@@ -1,0 +1,74 @@
+#!/bin/sh
+# =============================================================
+# devstack — Remote one-touch bootstrap
+#
+# Usage:
+#   curl -fsSL https://raw.githubusercontent.com/woogiekim/devstack/main/bootstrap | sh
+#
+# What it does:
+#   1. Resolves the checkout location (DEVSTACK_HOME, default
+#      ${HOME}/.devstack/src).
+#   2. If that path is an existing devstack git checkout, fetches the
+#      requested ref and resets to it. Otherwise clones with --depth 1.
+#   3. execs "$DEVSTACK_HOME/install" so the canonical local installer
+#      keeps owning symlinks ($HOME/.local/bin/devstack + legacy ccstack
+#      alias), AI skill installation, and workspace registration.
+#
+# Env overrides:
+#   DEVSTACK_HOME  — checkout directory (default: ${HOME}/.devstack/src)
+#   DEVSTACK_REPO  — git remote URL  (default: https://github.com/woogiekim/devstack.git)
+#   DEVSTACK_REF   — branch or tag    (default: main)
+#
+# POSIX sh. Idempotent. Fail-fast. No bashisms.
+# =============================================================
+
+set -eu
+
+DEVSTACK_REPO=${DEVSTACK_REPO:-https://github.com/woogiekim/devstack.git}
+DEVSTACK_REF=${DEVSTACK_REF:-main}
+DEVSTACK_HOME=${DEVSTACK_HOME:-"${HOME}/.devstack/src"}
+
+log_info()  { printf '[devstack-bootstrap] %s\n'  "$1"; }
+log_warn()  { printf '[devstack-bootstrap] WARN: %s\n' "$1" >&2; }
+log_error() { printf '[devstack-bootstrap] ERROR: %s\n' "$1" >&2; exit 1; }
+
+# -------------------------------------------------------------
+# Preflight — fail fast with clear messages
+# -------------------------------------------------------------
+if ! command -v git >/dev/null 2>&1; then
+    log_error "git is required but was not found on PATH. Install git (e.g. \`xcode-select --install\` on macOS, or your distro's git package) and re-run."
+fi
+
+# -------------------------------------------------------------
+# Resolve checkout — clone or update in place
+# -------------------------------------------------------------
+parent_dir=$(dirname -- "$DEVSTACK_HOME")
+mkdir -p "$parent_dir"
+
+if [ -d "$DEVSTACK_HOME" ]; then
+    if [ -d "$DEVSTACK_HOME/.git" ] \
+        || git -C "$DEVSTACK_HOME" rev-parse --git-dir >/dev/null 2>&1; then
+        log_info "Updating existing devstack checkout at $DEVSTACK_HOME (ref=$DEVSTACK_REF)"
+        git -C "$DEVSTACK_HOME" fetch --depth 1 origin "$DEVSTACK_REF"
+        git -C "$DEVSTACK_HOME" reset --hard FETCH_HEAD
+    else
+        log_error "DEVSTACK_HOME exists but is not a git checkout: $DEVSTACK_HOME. Move or remove it, then re-run the bootstrap. (Override DEVSTACK_HOME with a different path to install elsewhere.)"
+    fi
+else
+    log_info "Cloning $DEVSTACK_REPO (ref=$DEVSTACK_REF) into $DEVSTACK_HOME"
+    git clone --depth 1 --branch "$DEVSTACK_REF" "$DEVSTACK_REPO" "$DEVSTACK_HOME"
+fi
+
+# -------------------------------------------------------------
+# Hand off to the canonical installer in the checkout
+# -------------------------------------------------------------
+INSTALLER="$DEVSTACK_HOME/install"
+
+if [ ! -x "$INSTALLER" ]; then
+    log_error "Expected installer not found or not executable: $INSTALLER. The clone may be incomplete; remove $DEVSTACK_HOME and re-run."
+fi
+
+export DEVSTACK_HOME
+
+log_info "Running canonical installer: $INSTALLER"
+exec "$INSTALLER"

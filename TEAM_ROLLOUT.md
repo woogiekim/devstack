@@ -31,7 +31,20 @@ For startup, recovery, Analyze, Apply, or UI behavior changes:
 
 ## Installation
 
-From a repository that contains `.devstack.json` (or legacy `.ccstack.json`):
+The fastest path for a new developer is the remote one-touch bootstrap (see
+the [README install section](README.md#install-quick-start)):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/woogiekim/devstack/main/bootstrap | sh
+```
+
+The bootstrap clones the repo into `DEVSTACK_HOME` (default `~/.devstack/src`)
+and then execs the same `./install` script the local-checkout path uses, so the
+team-rollout install contract is unchanged.
+
+For contributors who already have a checkout, the local install path keeps
+working unchanged. From a repository that contains `.devstack.json` (or legacy
+`.ccstack.json`):
 
 ```bash
 ~/Developments/devstack/install

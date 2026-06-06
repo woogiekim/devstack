@@ -1,0 +1,38 @@
+services:
+  shop-db:
+    image: mysql:8.0
+    container_name: sample-shop-db
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: shop_local
+      MYSQL_USER: shop
+      MYSQL_PASSWORD: shop
+    ports:
+      - "3307:3306"
+    volumes:
+      - shop-db-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-ushop", "-pshop"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  pas-mock:
+    build:
+      context: ./pas-mock
+    image: sample-shop-pas-mock
+    container_name: sample-shop-pas-mock
+    ports:
+      - "18083:18083"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:18083/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  shop-db-data:

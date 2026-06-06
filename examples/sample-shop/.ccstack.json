@@ -1,0 +1,23 @@
+{
+  "workspace": "sample-shop",
+  "profiles": {
+    "default": {
+      "services": [
+        "app.shop-db",
+        "app.pas-mock"
+      ]
+    }
+  },
+  "services": {
+    "app.shop-db": {
+      "type": "compose",
+      "compose": "app.compose.yml",
+      "service": "shop-db"
+    },
+    "app.pas-mock": {
+      "type": "compose",
+      "compose": "app.compose.yml",
+      "service": "pas-mock"
+    }
+  }
+}

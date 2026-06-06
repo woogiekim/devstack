@@ -1,0 +1,8 @@
+.DS_Store
+.pytest_cache/
+__pycache__/
+*.py[cod]
+
+# crew (agent-crew local workspace)
+.agent-crew/
+.crew-worktrees/

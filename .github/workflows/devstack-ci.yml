@@ -1,0 +1,55 @@
+name: devstack-ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+      - name: Run unit tests
+        run: |
+          make test
+
+  smoke:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+      - name: Run smoke tests
+        env:
+          # New canonical DEVSTACK_SMOKE_* env names — the test code reads
+          # DEVSTACK_SMOKE_X with a CCSTACK_SMOKE_X fallback so older repo
+          # variables keep working through one release.
+          DEVSTACK_SMOKE_WORKSPACE_ROOT: ${{ vars.DEVSTACK_SMOKE_WORKSPACE_ROOT }}
+          DEVSTACK_SMOKE_WORKSPACE: ${{ vars.DEVSTACK_SMOKE_WORKSPACE }}
+          DEVSTACK_SMOKE_STRICT: ${{ vars.DEVSTACK_SMOKE_STRICT }}
+          DEVSTACK_SMOKE_HOST: ${{ vars.DEVSTACK_SMOKE_HOST }}
+          # Legacy CCSTACK_SMOKE_* variables remain populated as fallbacks
+          # for one release; the test code prefers DEVSTACK_SMOKE_* via
+          # env_read-style lookup.
+          CCSTACK_SMOKE_WORKSPACE_ROOT: ${{ vars.CCSTACK_SMOKE_WORKSPACE_ROOT }}
+          CCSTACK_SMOKE_WORKSPACE: ${{ vars.CCSTACK_SMOKE_WORKSPACE }}
+          CCSTACK_SMOKE_STRICT: ${{ vars.CCSTACK_SMOKE_STRICT }}
+          CCSTACK_SMOKE_HOST: ${{ vars.CCSTACK_SMOKE_HOST }}
+        run: |
+          make test-smoke

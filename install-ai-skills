@@ -1,0 +1,32 @@
+#!/usr/bin/env sh
+set -eu
+
+# install-ai-skills — installs the AI skill assets under both the canonical
+# ``devstack`` path AND the legacy ``ccstack`` path so existing AI agent
+# rules / prompts continue to find their content for one release.
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+CODEX_HOME=${CODEX_HOME:-"$HOME/.codex"}
+CLAUDE_HOME=${CLAUDE_HOME:-"$HOME/.claude"}
+
+# Codex — copy SKILL.md under both names.
+mkdir -p "$CODEX_HOME/skills/devstack"
+cp "$SCRIPT_DIR/skills/codex/SKILL.md" "$CODEX_HOME/skills/devstack/SKILL.md"
+mkdir -p "$CODEX_HOME/skills/ccstack"
+cp "$SCRIPT_DIR/skills/codex/SKILL.md" "$CODEX_HOME/skills/ccstack/SKILL.md"
+
+# Claude — copy the skill markdown under both names.
+mkdir -p "$CLAUDE_HOME/agents/skills"
+if [ -f "$SCRIPT_DIR/skills/claude/devstack.md" ]; then
+  CLAUDE_SKILL_SRC="$SCRIPT_DIR/skills/claude/devstack.md"
+else
+  CLAUDE_SKILL_SRC="$SCRIPT_DIR/skills/claude/ccstack.md"
+fi
+cp "$CLAUDE_SKILL_SRC" "$CLAUDE_HOME/agents/skills/devstack.md"
+cp "$CLAUDE_SKILL_SRC" "$CLAUDE_HOME/agents/skills/ccstack.md"
+
+printf 'Installed devstack AI skills (with legacy ccstack aliases for one release):\n'
+printf '  Codex:  %s\n' "$CODEX_HOME/skills/devstack/SKILL.md"
+printf '          %s  (legacy alias)\n' "$CODEX_HOME/skills/ccstack/SKILL.md"
+printf '  Claude: %s\n' "$CLAUDE_HOME/agents/skills/devstack.md"
+printf '          %s  (legacy alias)\n' "$CLAUDE_HOME/agents/skills/ccstack.md"

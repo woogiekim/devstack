@@ -1,0 +1,290 @@
+{
+  "schema_version": 1,
+  "description": "Shopping-domain overrides shipped with ccstack. Copy this file to '<your-workspace-root>/.ccstack-overrides.json' (the repo-level path the engine prefers) to recover the historical samplegoods / notes_box / notesys / tgenericlist / tflaggroup / contentDisplay behavior. Without this file, ccstack runs purely on its generic engine: controller-route REST probes, generic seed rows from schema, generic mockserver catchall, no domain literals.",
+  "mockserver": {
+    "key_route_triggers": {
+      "content": [
+        "/content-display",
+        "/content-displays",
+        "/content",
+        "/contents",
+        "/api/content-display",
+        "/api/contents"
+      ],
+      "samplegoods": [
+        "/sample-goods",
+        "/sample-goods/detail",
+        "/sample-goods/counts",
+        "/sample-goods/contents",
+        "/sample-categories",
+        "/sample-main-display"
+      ]
+    },
+    "route_responses": {
+      "sample-goods": "sample_goods_page",
+      "content-display": "content_display_page",
+      "content": "content_display_page"
+    },
+    "responses": {
+      "sample_goods_page": {
+        "data": [
+          {
+            "goodsSeq": 1,
+            "marketPlaceSeq": 1,
+            "sellerSeq": 1,
+            "productSeq": 1,
+            "goodsName": "ccstack local samplegoods goods",
+            "standardPrice": 10000,
+            "salePrice": 9000,
+            "deliverySeq": 1,
+            "deliveryPrice": 0,
+            "discountRatio": 10.0,
+            "dayDiscountYN": "N",
+            "oneBuyLimit": 1,
+            "state": 1,
+            "displayYN": "Y",
+            "displayBlogYN": "Y",
+            "stockCountDisplayYN": "Y",
+            "saleStartDate": "2026-01-01",
+            "saleStartTime": "00:00:00",
+            "saleEndDate": "2026-12-31",
+            "saleEndTime": "23:59:59",
+            "displayStartDate": "2026-01-01T00:00:00",
+            "updateDate": "2026-01-01T00:00:00",
+            "payMethod": "CARD",
+            "boxRatio": "1",
+            "orderPageShortCut": "Y",
+            "taxExemption": "N",
+            "optionUseType": 0,
+            "stockCount": 100,
+            "saleCount": 1,
+            "content": "ccstack local samplegoods content"
+          }
+        ],
+        "pageInfo": {
+          "type": "offset",
+          "sorted": false,
+          "totalCount": 1,
+          "elementCount": 1,
+          "page": 0,
+          "size": 5,
+          "offset": 0
+        }
+      },
+      "content_display_page": {
+        "status": 200,
+        "message": "ccstack local dummy",
+        "data": {
+          "content": [
+            {
+              "contentDisplaySeq": 1,
+              "listSeq": 1,
+              "position1": 1,
+              "position2": 1,
+              "position3": 1,
+              "position4": 1,
+              "fixYN": "Y",
+              "viewYN": "Y",
+              "sort": 1,
+              "title": "ccstack local content display",
+              "titleStyle": "ccstack local",
+              "displayStartDate": "2026-01-01T00:00:00",
+              "displayEndDate": "2026-12-31T23:59:59"
+            }
+          ],
+          "pageable": {
+            "pageNumber": 0,
+            "pageSize": 5,
+            "offset": 0,
+            "paged": true,
+            "unpaged": false,
+            "sort": {"sorted": false, "unsorted": true, "empty": true}
+          },
+          "totalElements": 1,
+          "totalPages": 1,
+          "last": true,
+          "size": 5,
+          "number": 0,
+          "sort": {"sorted": false, "unsorted": true, "empty": true},
+          "numberOfElements": 1,
+          "first": true,
+          "empty": false
+        }
+      }
+    }
+  },
+  "seeds": {
+    "tables": {
+      "notes_box_news_source": {
+        "engines": ["mssql"],
+        "columns": ["SOURCE_FLAG", "SOURCE_NAME", "SHOW_NAME", "DEL_FLAG"],
+        "rows": [["N", "ccstack", "ccstack local source", "N"]]
+      },
+      "notes_box": {
+        "engines": ["mssql"],
+        "columns": [
+          "KB_NO", "KK_CODE", "KB_PARENT_NO", "KB_TITLE", "KB_CONTENT",
+          "USERID", "KB_NICKNAME", "KB_REGDATE", "KB_DEL_FLAG", "KB_DISPLAY_FLAG",
+          "IS_NOTICE", "KB_READCNT", "KB_CHILD_NUM", "G_CATEGORY", "G_MODELNO",
+          "KB_NEWS_FLAG", "KB_THUMBNAIL", "MO_IMG", "MO_IMG2", "RSS_THUMBNAIL",
+          "RP_THUMBNAIL_IMG_URL", "KB_FACTORY", "KB_SUBTITLE"
+        ],
+        "rows": [[
+          1, "05", 0, "ccstack local content", "Local content seeded by ccstack for smoke verification.",
+          "ccstack", "ccstack local", "2026-01-01 10:00:00", "0", "Y",
+          "N", 7, 0, "0101", 1,
+          "N", "https://example.com/ccstack-thumb.jpg", "https://example.com/ccstack-main.jpg",
+          "https://example.com/ccstack-main-2.jpg", "https://example.com/ccstack-rss.jpg",
+          "https://example.com/ccstack-reply.jpg", "", "ccstack local subtitle"
+        ]]
+      },
+      "notesys_report_info": {
+        "columns": ["REPORT_CODE", "REPORT_TITLE", "REPORT_NAME", "USE_YN"],
+        "rows": [
+          ["R11", "Spam", "spam", "Y"],
+          ["R12", "Abuse", "abuse", "Y"],
+          ["R13", "Privacy", "privacy", "Y"],
+          ["R14", "Copyright", "copyright", "Y"],
+          ["R15", "Other", "other", "Y"]
+        ]
+      },
+      "tflaggroup": {
+        "columns": ["nFlagGroupSeq", "sTitle"],
+        "rows": [[1, "ccstack local"]]
+      },
+      "tgenericlist": {
+        "preferred_columns": [
+          "nListSeq", "nBoardSeq", "sTitle", "dtCreateDate", "dtCreateTime",
+          "nMemberSeq", "sMemberNick", "sMemberIP", "nConfirmType", "nListStatus"
+        ],
+        "values_map": {
+          "nlistseq": 1,
+          "nboardseq": 1,
+          "stitle": "ccstack local content",
+          "dtcreatedate": "2026-01-01",
+          "dtcreatetime": "00:00:00",
+          "nmemberseq": 1,
+          "smembernick": "local",
+          "smemberip": "127.0.0.1",
+          "nconfirmtype": 0,
+          "nliststatus": 0
+        },
+        "default_value": "local"
+      },
+      "tsamplecategory": {
+        "preferred_columns": [
+          "nSampleCategorySeq", "sSampleCategoryName", "emDisplayYN", "nSort",
+          "sImgUrl", "dtCreateDate", "dtUpdateDate", "emCategoryType"
+        ],
+        "values_map": {
+          "nsamplecategoryseq": 1,
+          "ssamplecategoryname": "ccstack local samplegoods category",
+          "emdisplayyn": "Y",
+          "nsort": 1,
+          "simgurl": "https://example.com/ccstack-samplegoods-category.jpg",
+          "dtcreatedate": "2026-01-01",
+          "dtupdatedate": "2026-01-01",
+          "emcategorytype": "N"
+        },
+        "default_value": "ccstack"
+      },
+      "tsamplegoods": {
+        "preferred_columns": [
+          "nGoodsSeq", "nMarketPlaceSeq", "nSellerSeq", "nProductSeq", "sGoodsName",
+          "nStandardPrice", "nSalePrice", "nDeliverySeq", "nDeliveryPrice", "fDiscountRatio",
+          "sDayDiscountYN", "nOneBuyLimit", "nState", "sDisplayYN", "sDisplayBlogYN",
+          "dtSaleStartDate", "dtSaleStartTime", "dtSaleEndDate", "dtSaleEndTime",
+          "dtDisplayStartDate", "dtUpdateDate", "sStockCountDisplayYN",
+          "emPayMethod", "sBoxRatio", "emOrderPageShortCut", "sTaxExemption", "nOptionUseType"
+        ],
+        "values_map": {
+          "ngoodsseq": 1,
+          "nmarketplaceseq": 1,
+          "nsellerseq": 1,
+          "nproductseq": 1,
+          "sgoodsname": "ccstack local samplegoods goods",
+          "nstandardprice": 10000,
+          "nsaleprice": 9000,
+          "ndeliveryseq": 1,
+          "ndeliveryprice": 0,
+          "fdiscountratio": 10.0,
+          "sdaydiscountyn": "N",
+          "nonebuylimit": 1,
+          "nstate": 5,
+          "sdisplayyn": "Y",
+          "sdisplayblogyn": "Y",
+          "dtsalestartdate": "2026-01-01",
+          "dtsalestarttime": "00:00:00",
+          "dtsaleenddate": "2026-12-31",
+          "dtsaleendtime": "23:59:59",
+          "dtdisplaystartdate": "2026-01-01 00:00:00",
+          "dtupdatedate": "2026-01-01 00:00:00",
+          "sstockcountdisplayyn": "Y",
+          "empaymethod": "CARD",
+          "sboxratio": "1",
+          "emorderpageshortcut": "1",
+          "staxexemption": "N",
+          "noptionusetype": 0
+        },
+        "default_value": "ccstack"
+      },
+      "tsamplegoodscount": {
+        "preferred_columns": ["nGoodsSeq", "nStockCount", "nSaleCount"],
+        "values_map": {"ngoodsseq": 1, "nstockcount": 100, "nsalecount": 1},
+        "default_value": 1
+      },
+      "tsamplegoodscontent": {
+        "preferred_columns": ["nGoodsSeq", "sContent"],
+        "values_map": {"ngoodsseq": 1, "scontent": "ccstack local samplegoods content"},
+        "default_value": "ccstack"
+      },
+      "tlinksamplecategorygoods": {
+        "preferred_columns": ["nSampleCategorySeq", "nGoodsSeq"],
+        "values_map": {"nsamplecategoryseq": 1, "ngoodsseq": 1},
+        "default_value": 1
+      }
+    },
+    "column_enum_literals": {
+      "external_provide_status": "ENABLED",
+      "folder_display_status": "USE",
+      "folder_origin_service_type": "WISH"
+    }
+  },
+  "verification": {
+    "service_name_keyword_probes": {
+      "samplegoods": [
+        {"label": "REST samplegoods goods", "path": "/sample-goods?page=0&size=5"},
+        {"label": "REST samplegoods featured goods", "path": "/sample-main/featured-goods"},
+        {"label": "REST samplegoods categories", "path": "/sample-main/categories"}
+      ]
+    },
+    "graphql_probes": [
+      {
+        "label": "GraphQL contentDisplays",
+        "query": "{ contentDisplays(input: { pageInformation: { page: 1, size: 5 } }) { code message pageInfo { totalCount elementCount page size } items { contentDisplaySeq listSeq title fixYN viewYN sort } } }",
+        "headers": {"Authorization": "Basic YWRtaW46ZW1waFluTnNlR3h5YjNGclpnPT0="}
+      },
+      {
+        "label": "GraphQL samplegoodsGoods",
+        "query": "{ samplegoodsGoods(input: { marketPlaceSeq: 1, pageInformation: { page: 1, size: 5 } }) { code message pageInfo { totalCount elementCount page size } items { goodsSeq goodsName salePrice standardPrice displayYN state } } }"
+      }
+    ]
+  },
+  "graphql_dummy": {
+    "schema_field_triggers": ["shows", "actors"]
+  },
+  "api_mock_recovery": {
+    "service_name_keyword_rules": {
+      "samplegoods": {
+        "env_overrides": {"SAMPLEGOODS_SERVICE_URL": "http://localhost:1080"},
+        "fix_message": "samplegoods backend routed to ccstack mock-http",
+        "expectation_routes": [
+          "/sample-goods",
+          "/sample-goods/detail",
+          "/sample-goods/counts",
+          "/sample-goods/contents"
+        ]
+      }
+    }
+  }
+}

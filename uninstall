@@ -1,0 +1,10 @@
+#!/usr/bin/env sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# Use the canonical ``devstack`` filename if the git mv has completed;
+# fall back to the legacy ``ccstack`` filename otherwise.
+if [ -f "$SCRIPT_DIR/devstack" ]; then
+  exec "$SCRIPT_DIR/devstack" uninstall "$@"
+fi
+exec "$SCRIPT_DIR/ccstack" uninstall "$@"

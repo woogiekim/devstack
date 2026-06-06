@@ -1,0 +1,83 @@
+#!/usr/bin/env sh
+set -eu
+
+# install — devstack installer. Prefers DEVSTACK_* env vars, falls back to
+# the legacy CCSTACK_* names for one release (mirrors the shell-side of
+# Shim 1). Installs BOTH the canonical ``devstack`` symlink AND the legacy
+# ``ccstack`` symlink under BIN_DIR so existing shell aliases / shebangs
+# continue to resolve.
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# Tool script is named ``devstack`` after the rename; the in-repo file may
+# still be called ``ccstack`` until the canonical git mv completes.
+if [ -f "$SCRIPT_DIR/devstack" ]; then
+  TOOL_FILE="$SCRIPT_DIR/devstack"
+else
+  TOOL_FILE="$SCRIPT_DIR/ccstack"
+fi
+export DEVSTACK_HOME=${DEVSTACK_HOME:-${CCSTACK_HOME:-"$SCRIPT_DIR"}}
+export CCSTACK_HOME=${CCSTACK_HOME:-"$DEVSTACK_HOME"}
+WORKSPACE_ROOT=${DEVSTACK_WORKSPACE_ROOT:-${CCSTACK_WORKSPACE_ROOT:-}}
+BIN_DIR=${DEVSTACK_BIN_DIR:-${CCSTACK_BIN_DIR:-"$HOME/.local/bin"}}
+WORKSPACE_NAME=${DEVSTACK_WORKSPACE_NAME:-${CCSTACK_WORKSPACE_NAME:-}}
+
+if [ -n "$WORKSPACE_ROOT" ]; then
+  REPO_ROOT=$(CDPATH= cd -- "$WORKSPACE_ROOT" && pwd)
+  # Shim 3 — accept either ``.devstack.json`` (canonical) or ``.ccstack.json``
+  # (legacy) as the manifest filename.
+  MANIFEST_FILE=""
+  if [ -f "$REPO_ROOT/.devstack.json" ]; then
+    MANIFEST_FILE="$REPO_ROOT/.devstack.json"
+  elif [ -f "$REPO_ROOT/.ccstack.json" ]; then
+    MANIFEST_FILE="$REPO_ROOT/.ccstack.json"
+  fi
+  if [ -z "$WORKSPACE_NAME" ] && [ -n "$MANIFEST_FILE" ]; then
+    WORKSPACE_NAME=$(python3 - "$MANIFEST_FILE" <<'PY'
+import json
+import sys
+print(json.load(open(sys.argv[1])).get("workspace", ""))
+PY
+)
+  fi
+
+  if [ -z "$WORKSPACE_NAME" ]; then
+    WORKSPACE_NAME=$(basename "$REPO_ROOT")
+  fi
+fi
+
+mkdir -p "$BIN_DIR"
+# Install BOTH command symlinks. The legacy ``ccstack`` alias lets existing
+# shell wrappers / PATH-pinned references keep working through one release.
+ln -sf "$TOOL_FILE" "$BIN_DIR/devstack"
+ln -sf "$TOOL_FILE" "$BIN_DIR/ccstack"
+chmod +x "$TOOL_FILE"
+
+if [ -n "$WORKSPACE_ROOT" ]; then
+  if [ -n "$WORKSPACE_NAME" ]; then
+    "$TOOL_FILE" workspace setup "$REPO_ROOT" --name "$WORKSPACE_NAME" --default
+  else
+    "$TOOL_FILE" workspace setup "$REPO_ROOT" --default
+    WORKSPACE_NAME=$("$TOOL_FILE" workspace default | sed 's/:.*//')
+  fi
+fi
+
+"$SCRIPT_DIR/install-ai-skills"
+
+printf '\nInstalled devstack.\n'
+printf '  Command:   %s/devstack  (legacy alias: %s/ccstack)\n' "$BIN_DIR" "$BIN_DIR"
+printf '  Home:      %s\n' "$DEVSTACK_HOME"
+if [ -n "$WORKSPACE_ROOT" ]; then
+  printf '  Workspace: %s -> %s\n' "$WORKSPACE_NAME" "$REPO_ROOT"
+else
+  printf '  Workspace: configure from the UI\n'
+fi
+printf '\n'
+printf 'If devstack is not found, add this to your shell profile:\n'
+printf '  export PATH="$HOME/.local/bin:$PATH"\n'
+printf '  export DEVSTACK_HOME="%s"\n' "$DEVSTACK_HOME"
+printf '\n'
+printf 'Open the UI and add a workspace with Bind -> Analyze -> Apply:\n'
+printf '  devstack ui\n'
+printf '\n'
+printf 'Uninstall later with:\n'
+printf '  devstack uninstall --yes\n'

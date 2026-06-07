@@ -13203,5 +13203,144 @@ class InitializeManagedInfraMySQLPostgresTest(unittest.TestCase):
         run_mock.assert_not_called()
 
 
+class ExistingManagedInfraRequirementBindMountTest(unittest.TestCase):
+    """Regression test for the compose-regeneration bug where
+    existing_managed_infra_requirement dropped the schema/DML init-script
+    bind-mounts whenever the persisted service entry in
+    devstack.generated.json had empty init_schema / init_dml — even though
+    the SQL files materialised under managed_schema_path / managed_dml_path
+    still existed on disk. The result was that the next compose `up` on a
+    fresh named data volume initialised an empty database.
+
+    The fix: append the engine-correct bind-mount whenever the host-side
+    SQL file exists, regardless of init_schema / init_dml being set on the
+    persisted entry, matching the target-path convention from
+    attach_schema_files_to_generated_databases.
+    """
+
+    def _materialize_sql(self, state_home: Path, workspace: str, engine: str):
+        schema_p = state_home / workspace / "infra" / "schema" / f"devstack-local-schema-{engine}.sql"
+        dml_p = state_home / workspace / "infra" / "schema" / f"devstack-local-dml-{engine}.sql"
+        schema_p.parent.mkdir(parents=True, exist_ok=True)
+        schema_p.write_text("CREATE TABLE x(id INT);\n")
+        dml_p.write_text("INSERT INTO x VALUES (1);\n")
+        return schema_p, dml_p
+
+    def _run_case(self, engine: str, expected_target_schema: str, expected_target_dml: str):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_home = Path(tmp) / "state"
+            workspace = "demo"
+            with mock.patch.object(ccstack, "STATE_HOME", state_home):
+                # Confirm the helpers resolve to a path inside our temp state home.
+                self.assertEqual(
+                    ccstack.managed_schema_path(workspace, engine).parent.parent,
+                    state_home / workspace / "infra",
+                )
+                schema_p, dml_p = self._materialize_sql(state_home, workspace, engine)
+
+                # Persisted service entry — bug shape: init_schema / init_dml empty,
+                # volumes list only contains the named data volume (the bind-mount
+                # was lost on the previous compose regeneration).
+                persisted = {
+                    "type": "compose",
+                    "compose": str(ccstack.managed_infra_compose_path(workspace)),
+                    "project": ccstack.managed_compose_project_name(workspace),
+                    "service": ccstack.MANAGED_DATABASES[engine]["label"],
+                    "engine": engine,
+                    "port": ccstack.MANAGED_DATABASES[engine]["port"],
+                    "image": ccstack.MANAGED_DATABASES[engine]["image"],
+                    "container_port": ccstack.MANAGED_DATABASES[engine]["container_port"],
+                    "environment": {},
+                    "command": None,
+                    "volumes": ccstack.database_data_volumes(engine, ccstack.MANAGED_DATABASES[engine]["label"]),
+                    "database": "demo",
+                    "username": "ccstack",
+                    "password": "ccstack",
+                    "init_schema": None,
+                    "init_dml": None,
+                }
+
+                req = ccstack.existing_managed_infra_requirement(
+                    workspace, f"devstack.infra.{persisted['service']}", persisted
+                )
+
+        self.assertIsNotNone(req, f"existing_managed_infra_requirement returned None for {engine}")
+        volumes = req.get("volumes") or []
+        schema_bind = f"{schema_p}:{expected_target_schema}:ro"
+        dml_bind = f"{dml_p}:{expected_target_dml}:ro"
+        self.assertIn(
+            schema_bind, volumes,
+            f"{engine}: schema bind-mount missing from regenerated volumes (got {volumes!r})",
+        )
+        self.assertIn(
+            dml_bind, volumes,
+            f"{engine}: DML bind-mount missing from regenerated volumes (got {volumes!r})",
+        )
+        # No duplicate entries — fix must be idempotent across repeated regenerations.
+        self.assertEqual(volumes.count(schema_bind), 1, f"{engine}: schema bind-mount duplicated")
+        self.assertEqual(volumes.count(dml_bind), 1, f"{engine}: DML bind-mount duplicated")
+
+    def test_mysql_bind_mounts_restored_when_persisted_init_paths_empty(self):
+        self._run_case(
+            "mysql",
+            "/docker-entrypoint-initdb.d/010-devstack-local-schema.sql",
+            "/docker-entrypoint-initdb.d/020-devstack-local-dml.sql",
+        )
+
+    def test_postgresql_bind_mounts_restored_when_persisted_init_paths_empty(self):
+        self._run_case(
+            "postgresql",
+            "/docker-entrypoint-initdb.d/010-devstack-local-schema.sql",
+            "/docker-entrypoint-initdb.d/020-devstack-local-dml.sql",
+        )
+
+    def test_mssql_bind_mounts_restored_when_persisted_init_paths_empty(self):
+        # MSSQL uses /devstack-init/ (sqlcmd applies the scripts), not initdb.d.
+        # The bind-mount still belongs on the compose file so sqlcmd can read the
+        # host-materialised SQL from inside the container.
+        self._run_case(
+            "mssql",
+            "/devstack-init/010-devstack-local-schema.sql",
+            "/devstack-init/020-devstack-local-dml.sql",
+        )
+
+    def test_mysql_no_duplicate_when_persisted_volumes_already_have_bind_mount(self):
+        """Idempotency: if the persisted volumes list already contains the
+        bind-mount strings, the reconstruction must not duplicate them."""
+        engine = "mysql"
+        with tempfile.TemporaryDirectory() as tmp:
+            state_home = Path(tmp) / "state"
+            workspace = "demo"
+            with mock.patch.object(ccstack, "STATE_HOME", state_home):
+                schema_p, dml_p = self._materialize_sql(state_home, workspace, engine)
+                schema_bind = f"{schema_p}:/docker-entrypoint-initdb.d/010-devstack-local-schema.sql:ro"
+                dml_bind = f"{dml_p}:/docker-entrypoint-initdb.d/020-devstack-local-dml.sql:ro"
+                persisted = {
+                    "type": "compose",
+                    "compose": str(ccstack.managed_infra_compose_path(workspace)),
+                    "service": "mysql",
+                    "engine": "mysql",
+                    "port": 3306,
+                    "image": "mysql:8.0",
+                    "container_port": 3306,
+                    "environment": {},
+                    "volumes": [
+                        "devstack-mysql-data:/var/lib/mysql",
+                        schema_bind,
+                        dml_bind,
+                    ],
+                    "database": "demo",
+                    "init_schema": "/docker-entrypoint-initdb.d/010-devstack-local-schema.sql",
+                    "init_dml": "/docker-entrypoint-initdb.d/020-devstack-local-dml.sql",
+                }
+                req = ccstack.existing_managed_infra_requirement(
+                    workspace, "devstack.infra.mysql", persisted
+                )
+
+        volumes = req.get("volumes") or []
+        self.assertEqual(volumes.count(schema_bind), 1, f"schema bind-mount duplicated: {volumes!r}")
+        self.assertEqual(volumes.count(dml_bind), 1, f"DML bind-mount duplicated: {volumes!r}")
+
+
 if __name__ == "__main__":
     unittest.main()

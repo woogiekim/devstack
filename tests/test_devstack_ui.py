@@ -12825,5 +12825,382 @@ class AttachSchemaFilesNonMssqlTest(unittest.TestCase):
         )
 
 
+class InitializeManagedInfraMySQLPostgresTest(unittest.TestCase):
+    """Regression tests for: initialize_managed_infra must apply DDL/DML for
+    MySQL and PostgreSQL (not just MSSQL), and must warn the user when a
+    stale named data volume is silently bypassing /docker-entrypoint-initdb.d/.
+
+    Root cause history:
+      1. initialize_managed_infra used to early-return for engine != "mssql",
+         so MySQL/PostgreSQL DDL never ran via that code path.
+      2. MySQL/Postgres images silently skip /docker-entrypoint-initdb.d/
+         when the named data volume already contains an initialized database
+         from a prior run, so the bind-mount alone is not sufficient.
+    """
+
+    def _workspace_with_schema_files(self, tmp_root: Path, engine: str, with_dml: bool = True):
+        """Build a Workspace plus seeded schema/dml files on disk for `engine`."""
+        schema_dir = ccstack.managed_schema_dir("test-shop")
+        schema_dir.mkdir(parents=True, exist_ok=True)
+        schema_path = ccstack.managed_schema_path("test-shop", engine)
+        dml_path = ccstack.managed_dml_path("test-shop", engine)
+        schema_path.write_text("CREATE TABLE t (id INT);\n")
+        if with_dml:
+            dml_path.write_text("INSERT INTO t VALUES (1);\n")
+        workspace = ccstack.Workspace(
+            tmp_root,
+            {
+                "workspace": "test-shop",
+                "default_timeout": 5,
+                "profiles": {},
+                "services": {},
+            },
+        )
+        return workspace, schema_path, dml_path
+
+    # --- MSSQL behaviour must remain unchanged --------------------------------
+
+    def test_initialize_mssql_path_still_runs_sqlcmd(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _, _ = self._workspace_with_schema_files(Path(tmp), "mssql")
+            service = {
+                "type": "compose",
+                "engine": "mssql",
+                "compose": "compose.yml",
+                "service": "mssql",
+                "database": "shop",
+            }
+            with mock.patch.object(workspace, "run_mssql_sqlcmd") as sqlcmd, \
+                 mock.patch.object(ccstack, "managed_data_volume_exists", return_value=False):
+                workspace.initialize_managed_infra(service)
+        # At minimum the CREATE DATABASE call must have fired.
+        self.assertGreaterEqual(sqlcmd.call_count, 1)
+
+    # --- MySQL: DDL must be applied ------------------------------------------
+
+    def test_initialize_mysql_applies_schema_via_compose_exec(self):
+        """MySQL services must run init_schema via `docker compose exec` so
+        the SQL file is applied even when the named data volume already
+        existed and the image silently skipped /docker-entrypoint-initdb.d/."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, schema_path, dml_path = self._workspace_with_schema_files(
+                Path(tmp), "mysql"
+            )
+            service = {
+                "type": "compose",
+                "engine": "mysql",
+                "compose": str(Path(tmp) / "compose.yml"),
+                "service": "mysql",
+                "database": "shop",
+                "username": "ccstack",
+                "password": "ccstack",
+                "init_schema": "/docker-entrypoint-initdb.d/010-devstack-local-schema.sql",
+                "init_dml": "/docker-entrypoint-initdb.d/020-devstack-local-dml.sql",
+            }
+            with mock.patch.object(ccstack, "run") as run_mock, \
+                 mock.patch.object(
+                     workspace,
+                     "run_mysql_apply_sql_with_retry",
+                 ) as apply_mock, \
+                 mock.patch.object(ccstack, "managed_data_volume_exists", return_value=False):
+                run_mock.return_value = None
+                workspace.initialize_managed_infra(service)
+
+            # Schema and DML must both be applied via the mysql helper.
+            applied = [c.args[1] for c in apply_mock.call_args_list]
+            self.assertIn(str(schema_path), applied)
+            self.assertIn(str(dml_path), applied)
+
+    def test_initialize_mysql_skips_when_no_schema_files(self):
+        """No init_schema / init_dml means no apply attempt — must not crash
+        and must not call the apply helper."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _, _ = self._workspace_with_schema_files(
+                Path(tmp), "mysql", with_dml=False
+            )
+            # Remove the schema file we seeded — simulating "no DDL configured"
+            ccstack.managed_schema_path("test-shop", "mysql").unlink()
+            service = {
+                "type": "compose",
+                "engine": "mysql",
+                "compose": str(Path(tmp) / "compose.yml"),
+                "service": "mysql",
+                "database": "shop",
+                # No init_schema / init_dml keys at all.
+            }
+            with mock.patch.object(
+                workspace, "run_mysql_apply_sql_with_retry"
+            ) as apply_mock, \
+                mock.patch.object(ccstack, "managed_data_volume_exists", return_value=False):
+                workspace.initialize_managed_infra(service)
+            apply_mock.assert_not_called()
+
+    # --- PostgreSQL: DDL must be applied -------------------------------------
+
+    def test_initialize_postgresql_applies_schema_via_compose_exec(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, schema_path, dml_path = self._workspace_with_schema_files(
+                Path(tmp), "postgresql"
+            )
+            service = {
+                "type": "compose",
+                "engine": "postgresql",
+                "compose": str(Path(tmp) / "compose.yml"),
+                "service": "postgres",
+                "database": "shop",
+                "username": "ccstack",
+                "password": "ccstack",
+                "init_schema": "/docker-entrypoint-initdb.d/010-devstack-local-schema.sql",
+                "init_dml": "/docker-entrypoint-initdb.d/020-devstack-local-dml.sql",
+            }
+            with mock.patch.object(ccstack, "run") as run_mock, \
+                 mock.patch.object(
+                     workspace,
+                     "run_postgres_apply_sql_with_retry",
+                 ) as apply_mock, \
+                 mock.patch.object(ccstack, "managed_data_volume_exists", return_value=False):
+                run_mock.return_value = None
+                workspace.initialize_managed_infra(service)
+
+            applied = [c.args[1] for c in apply_mock.call_args_list]
+            self.assertIn(str(schema_path), applied)
+            self.assertIn(str(dml_path), applied)
+
+    # --- Stale named volume detection ----------------------------------------
+
+    def test_managed_data_volume_exists_returns_true_on_rc_zero(self):
+        """managed_data_volume_exists must shell out to `docker volume inspect`
+        and return True when the volume already exists (rc=0)."""
+        completed = mock.Mock()
+        completed.returncode = 0
+        with mock.patch.object(ccstack.subprocess, "run", return_value=completed) as sub:
+            self.assertTrue(ccstack.managed_data_volume_exists("mysql", "mysql"))
+        sub.assert_called_once()
+        # First arg must be the docker volume inspect command for the right name.
+        args = sub.call_args.args[0]
+        self.assertEqual(args[:3], ["docker", "volume", "inspect"])
+        self.assertEqual(args[3], "devstack-mysql-data")
+
+    def test_managed_data_volume_exists_returns_false_on_rc_nonzero(self):
+        completed = mock.Mock()
+        completed.returncode = 1
+        with mock.patch.object(ccstack.subprocess, "run", return_value=completed):
+            self.assertFalse(ccstack.managed_data_volume_exists("mysql", "mysql"))
+
+    def test_managed_data_volume_exists_returns_false_when_docker_missing(self):
+        """If docker is not installed the helper must not crash; return False."""
+        with mock.patch.object(ccstack.subprocess, "run", side_effect=FileNotFoundError("docker")):
+            self.assertFalse(ccstack.managed_data_volume_exists("mysql", "mysql"))
+
+    def test_managed_data_volume_exists_returns_false_for_engine_without_volume(self):
+        """Engines outside MANAGED_DATABASES have no managed data volume —
+        the helper must return False without shelling out."""
+        with mock.patch.object(ccstack.subprocess, "run") as sub:
+            self.assertFalse(ccstack.managed_data_volume_exists("oracle", "oracle"))
+        sub.assert_not_called()
+
+    def test_initialize_mysql_warns_when_data_volume_already_exists(self):
+        """When the named data volume already exists, devstack must print a
+        clear warning to stderr explaining that /docker-entrypoint-initdb.d/
+        is silently skipped and pointing to the --recreate-volumes remediation."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _, _ = self._workspace_with_schema_files(Path(tmp), "mysql")
+            service = {
+                "type": "compose",
+                "engine": "mysql",
+                "compose": str(Path(tmp) / "compose.yml"),
+                "service": "mysql",
+                "database": "shop",
+                "username": "ccstack",
+                "password": "ccstack",
+                "init_schema": "/docker-entrypoint-initdb.d/010-devstack-local-schema.sql",
+            }
+            from io import StringIO
+            buf = StringIO()
+            with mock.patch.object(ccstack.sys, "stderr", buf), \
+                 mock.patch.object(ccstack, "managed_data_volume_exists", return_value=True), \
+                 mock.patch.object(workspace, "run_mysql_apply_sql_with_retry"):
+                workspace.initialize_managed_infra(service)
+            stderr_text = buf.getvalue()
+            self.assertIn("devstack-mysql-data", stderr_text)
+            self.assertIn("docker-entrypoint-initdb.d", stderr_text)
+            self.assertIn("--recreate-volumes", stderr_text)
+
+    def test_initialize_mysql_does_not_warn_when_data_volume_absent(self):
+        """First-run scenario: no existing named volume → no stale-volume warning."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _, _ = self._workspace_with_schema_files(Path(tmp), "mysql")
+            service = {
+                "type": "compose",
+                "engine": "mysql",
+                "compose": str(Path(tmp) / "compose.yml"),
+                "service": "mysql",
+                "database": "shop",
+                "username": "ccstack",
+                "password": "ccstack",
+                "init_schema": "/docker-entrypoint-initdb.d/010-devstack-local-schema.sql",
+            }
+            from io import StringIO
+            buf = StringIO()
+            with mock.patch.object(ccstack.sys, "stderr", buf), \
+                 mock.patch.object(ccstack, "managed_data_volume_exists", return_value=False), \
+                 mock.patch.object(workspace, "run_mysql_apply_sql_with_retry"):
+                workspace.initialize_managed_infra(service)
+            stderr_text = buf.getvalue()
+            self.assertNotIn("docker-entrypoint-initdb.d", stderr_text)
+
+    def test_initialize_postgresql_warns_when_data_volume_already_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _, _ = self._workspace_with_schema_files(Path(tmp), "postgresql")
+            service = {
+                "type": "compose",
+                "engine": "postgresql",
+                "compose": str(Path(tmp) / "compose.yml"),
+                "service": "postgres",
+                "database": "shop",
+                "username": "ccstack",
+                "password": "ccstack",
+                "init_schema": "/docker-entrypoint-initdb.d/010-devstack-local-schema.sql",
+            }
+            from io import StringIO
+            buf = StringIO()
+            with mock.patch.object(ccstack.sys, "stderr", buf), \
+                 mock.patch.object(ccstack, "managed_data_volume_exists", return_value=True), \
+                 mock.patch.object(workspace, "run_postgres_apply_sql_with_retry"):
+                workspace.initialize_managed_infra(service)
+            stderr_text = buf.getvalue()
+            self.assertIn("devstack-postgres-data", stderr_text)
+            self.assertIn("--recreate-volumes", stderr_text)
+
+    # --- run_mysql_apply_sql command shape -----------------------------------
+
+    def test_run_mysql_apply_sql_invokes_docker_compose_exec(self):
+        """The mysql apply helper must build a `docker compose exec` command
+        that pipes the SQL file into the mysql CLI inside the container."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, schema_path, _ = self._workspace_with_schema_files(Path(tmp), "mysql")
+            service = {
+                "type": "compose",
+                "engine": "mysql",
+                "compose": str(Path(tmp) / "compose.yml"),
+                "service": "mysql",
+                "database": "shop",
+                "username": "ccstack",
+                "password": "ccstack",
+            }
+            with mock.patch.object(ccstack, "compose_command", return_value=["docker", "compose"]), \
+                 mock.patch.object(ccstack, "run") as run_mock:
+                workspace.run_mysql_apply_sql(service, str(schema_path))
+        args = run_mock.call_args.args[0]
+        # Must invoke compose exec on the right service with stdin = SQL file
+        self.assertIn("exec", args)
+        self.assertIn("-T", args)
+        self.assertIn("mysql", args)
+        # Either a `mysql` CLI call (with -u/-p and the database) or a `sh -c`
+        # wrapper must be present — both forms are acceptable, but the database
+        # name must appear in the command.
+        self.assertTrue(
+            "shop" in " ".join(args),
+            f"database name 'shop' must appear in args: {args}",
+        )
+
+    def test_run_postgres_apply_sql_invokes_docker_compose_exec(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, schema_path, _ = self._workspace_with_schema_files(Path(tmp), "postgresql")
+            service = {
+                "type": "compose",
+                "engine": "postgresql",
+                "compose": str(Path(tmp) / "compose.yml"),
+                "service": "postgres",
+                "database": "shop",
+                "username": "ccstack",
+                "password": "ccstack",
+            }
+            with mock.patch.object(ccstack, "compose_command", return_value=["docker", "compose"]), \
+                 mock.patch.object(ccstack, "run") as run_mock:
+                workspace.run_postgres_apply_sql(service, str(schema_path))
+        args = run_mock.call_args.args[0]
+        self.assertIn("exec", args)
+        self.assertIn("-T", args)
+        self.assertIn("postgres", args)
+        self.assertTrue(
+            "shop" in " ".join(args),
+            f"database name 'shop' must appear in args: {args}",
+        )
+
+    def test_run_mysql_apply_sql_retries_until_ready(self):
+        """run_mysql_apply_sql_with_retry must retry on DevstackError until
+        the configured timeout elapses, matching the mssql helper's contract."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, schema_path, _ = self._workspace_with_schema_files(Path(tmp), "mysql")
+            service = {
+                "type": "compose",
+                "engine": "mysql",
+                "compose": str(Path(tmp) / "compose.yml"),
+                "service": "mysql",
+                "database": "shop",
+                "username": "ccstack",
+                "password": "ccstack",
+            }
+            with mock.patch.object(
+                workspace,
+                "run_mysql_apply_sql",
+                side_effect=[ccstack.CcstackError("mysql not ready"), None],
+            ) as apply_mock, mock.patch.object(ccstack.time, "sleep") as sleep_mock:
+                workspace.run_mysql_apply_sql_with_retry(service, str(schema_path))
+        self.assertEqual(apply_mock.call_count, 2)
+        sleep_mock.assert_called_once_with(2)
+
+    def test_run_postgres_apply_sql_retries_until_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, schema_path, _ = self._workspace_with_schema_files(Path(tmp), "postgresql")
+            service = {
+                "type": "compose",
+                "engine": "postgresql",
+                "compose": str(Path(tmp) / "compose.yml"),
+                "service": "postgres",
+                "database": "shop",
+                "username": "ccstack",
+                "password": "ccstack",
+            }
+            with mock.patch.object(
+                workspace,
+                "run_postgres_apply_sql",
+                side_effect=[ccstack.CcstackError("postgres not ready"), None],
+            ) as apply_mock, mock.patch.object(ccstack.time, "sleep") as sleep_mock:
+                workspace.run_postgres_apply_sql_with_retry(service, str(schema_path))
+        self.assertEqual(apply_mock.call_count, 2)
+        sleep_mock.assert_called_once_with(2)
+
+    # --- Engines outside the managed-databases set are no-ops ----------------
+
+    def test_initialize_non_database_compose_service_is_noop(self):
+        """A compose service that is not a managed database (e.g. redis) must
+        still be a no-op after the engine gate is broadened."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = ccstack.Workspace(
+                root,
+                {
+                    "workspace": "test-shop",
+                    "default_timeout": 5,
+                    "profiles": {},
+                    "services": {},
+                },
+            )
+            service = {
+                "type": "compose",
+                "engine": "redis",
+                "compose": "compose.yml",
+                "service": "redis",
+            }
+            with mock.patch.object(workspace, "run_mssql_sqlcmd") as sqlcmd, \
+                 mock.patch.object(ccstack, "run") as run_mock, \
+                 mock.patch.object(ccstack, "managed_data_volume_exists", return_value=False):
+                workspace.initialize_managed_infra(service)
+        sqlcmd.assert_not_called()
+        run_mock.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

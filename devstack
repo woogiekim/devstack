@@ -23,6 +23,7 @@ import json
 import os
 import re
 import select
+import shlex
 import signal
 import shutil
 import socket
@@ -6377,6 +6378,40 @@ def database_data_volumes(engine: str, label: str) -> List[str]:
     if engine == "mssql":
         return [f"devstack-{label}-data:/var/opt/mssql"]
     return []
+
+
+def managed_data_volume_exists(engine: str, label: str) -> bool:
+    """Return True when the managed named data volume for `(engine, label)`
+    already exists in the local Docker engine.
+
+    Drives the stale-volume warning in ``Workspace.initialize_managed_infra``:
+    when a MySQL/PostgreSQL data volume already contains an initialized
+    database from a prior run, the image silently skips
+    ``/docker-entrypoint-initdb.d/`` on the next ``up`` and the bind-mounted
+    seed scripts never execute. The user must be told this is happening.
+
+    Defensive contract:
+
+    - Engines outside ``MANAGED_DATABASES`` have no managed data volume —
+      return ``False`` without shelling out (cheap, deterministic).
+    - Any subprocess failure (docker missing, daemon down, OS error) is
+      swallowed and ``False`` is returned. The caller treats absence as
+      "no warning needed" — the worst-case outcome is a missed warning, never
+      a broken ``devstack up``.
+    """
+    if engine not in MANAGED_DATABASES:
+        return False
+    volume_name = f"devstack-{label}-data"
+    try:
+        result = subprocess.run(
+            ["docker", "volume", "inspect", volume_name],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except (FileNotFoundError, OSError):
+        return False
+    return result.returncode == 0
 
 
 def database_driver_class(engine: str) -> str:
@@ -15285,8 +15320,22 @@ class Workspace:
             write_managed_compose(compose_file, requirements, self.name)
 
     def initialize_managed_infra(self, service: Dict[str, Any]) -> None:
-        if service.get("type") != "compose" or service.get("engine") != "mssql":
+        if service.get("type") != "compose":
             return
+        engine = str(service.get("engine") or "").lower()
+        if engine == "mssql":
+            self._initialize_mssql(service)
+            return
+        if engine in {"mysql", "mariadb"}:
+            self._initialize_mysql_family(service, engine)
+            return
+        if engine == "postgresql":
+            self._initialize_postgresql(service)
+            return
+        # Any other compose service (redis, kafka, mongo, ...) carries no
+        # devstack-managed DDL and is left untouched.
+
+    def _initialize_mssql(self, service: Dict[str, Any]) -> None:
         database = str(service.get("database") or "").strip()
         if not database:
             return
@@ -15299,6 +15348,181 @@ class Workspace:
             script = str(service.get(key) or "").strip()
             if script:
                 self.run_mssql_sqlcmd_with_retry(service, ["-d", database, "-i", script])
+
+    def _initialize_mysql_family(self, service: Dict[str, Any], engine: str) -> None:
+        """Apply DDL/DML for MySQL or MariaDB.
+
+        Unlike MSSQL we cannot rely on a sqlcmd-style CLI driver, but unlike
+        the pure-compose path we also cannot rely on
+        ``/docker-entrypoint-initdb.d/`` because the official image silently
+        skips that directory whenever the named data volume already contains
+        an initialized database. The fix is to actively run the seeded SQL
+        files (resolved via ``managed_schema_path`` / ``managed_dml_path``)
+        through ``docker compose exec`` on every start.
+        """
+        database = str(service.get("database") or "").strip()
+        if not database:
+            return
+
+        defaults = MANAGED_DATABASES[engine]
+        label = str(defaults["label"])
+        self._warn_if_managed_data_volume_stale(service, engine, label)
+
+        for key in ("init_schema", "init_dml"):
+            host_path = self._resolved_managed_sql_host_path(service, engine, key)
+            if host_path is None:
+                continue
+            self.run_mysql_apply_sql_with_retry(service, str(host_path))
+
+    def _initialize_postgresql(self, service: Dict[str, Any]) -> None:
+        """Apply DDL/DML for PostgreSQL — same rationale as MySQL above."""
+        database = str(service.get("database") or "").strip()
+        if not database:
+            return
+
+        defaults = MANAGED_DATABASES["postgresql"]
+        label = str(defaults["label"])
+        self._warn_if_managed_data_volume_stale(service, "postgresql", label)
+
+        for key in ("init_schema", "init_dml"):
+            host_path = self._resolved_managed_sql_host_path(service, "postgresql", key)
+            if host_path is None:
+                continue
+            self.run_postgres_apply_sql_with_retry(service, str(host_path))
+
+    def _resolved_managed_sql_host_path(
+        self, service: Dict[str, Any], engine: str, key: str
+    ) -> Optional[Path]:
+        """Resolve the host-side path of the seeded init_schema / init_dml file.
+
+        Returns None when the field is not set on the service or when the
+        materialized file is missing on disk — the caller treats both as
+        "no SQL to apply" and silently skips it.
+        """
+        script = str(service.get(key) or "").strip()
+        if not script:
+            return None
+        if key == "init_schema":
+            path = managed_schema_path(self.name, engine)
+        else:
+            path = managed_dml_path(self.name, engine)
+        if not path.exists():
+            return None
+        return path
+
+    def _warn_if_managed_data_volume_stale(
+        self, service: Dict[str, Any], engine: str, label: str
+    ) -> None:
+        """When the named data volume for `(engine, label)` already exists,
+        write a one-line warning explaining that the image's first-run
+        ``/docker-entrypoint-initdb.d/`` is being silently skipped and that
+        the seeded SQL is being applied via ``docker compose exec`` instead.
+
+        The warning also points the user at the existing ``--recreate-volumes``
+        remediation path so they can rebuild from scratch when needed."""
+        # Skip the warning entirely when neither init_schema nor init_dml is
+        # configured — there is no DDL to apply, so no bypass is happening.
+        if not service.get("init_schema") and not service.get("init_dml"):
+            return
+        if not managed_data_volume_exists(engine, label):
+            return
+        volume_name = f"devstack-{label}-data"
+        service_name = str(service.get("service") or label)
+        sys.stderr.write(
+            f"devstack: warning: named data volume {volume_name!r} already exists; "
+            f"the {service_name} container will silently skip "
+            f"/docker-entrypoint-initdb.d/ on this start. "
+            f"devstack is re-applying the seeded schema via 'docker compose exec' "
+            f"so the DDL is still loaded, but if you need a clean re-init run:\n"
+            f"    devstack workspace apply <workspace> --recreate-volumes\n"
+        )
+
+    def run_mysql_apply_sql_with_retry(self, service: Dict[str, Any], script_path: str) -> None:
+        deadline = time.time() + self.service_start_timeout(service)
+        while True:
+            try:
+                self.run_mysql_apply_sql(service, script_path)
+                return
+            except DevstackError as error:
+                if time.time() >= deadline:
+                    raise error
+                time.sleep(2)
+
+    def run_mysql_apply_sql(self, service: Dict[str, Any], script_path: str) -> None:
+        compose_file = self.compose_file_path(service)
+        engine = str(service.get("engine") or "mysql").lower()
+        defaults = MANAGED_DATABASES.get(engine, MANAGED_DATABASES["mysql"])
+        username = str(service.get("username") or defaults["username"])
+        password = str(service.get("password") or defaults["password"])
+        database = str(service.get("database") or "").strip()
+        if not database:
+            raise DevstackError(
+                f"{service.get('service', 'mysql')}: cannot apply SQL — no database configured"
+            )
+        # `sh -c "mysql ... < /script"` is the most portable form across mysql
+        # and mariadb images: it avoids assumptions about argparse handling
+        # of `-e` quoting and reuses stdin redirection which every official
+        # image supports.
+        inner = (
+            f"mysql -u{shlex.quote(username)} -p{shlex.quote(password)} "
+            f"{shlex.quote(database)} < {shlex.quote(script_path)}"
+        )
+        command = [
+            *compose_command(self.root),
+            *compose_project_args(service),
+            "-f",
+            str(compose_file),
+            "exec",
+            "-T",
+            str(service["service"]),
+            "sh",
+            "-c",
+            inner,
+        ]
+        run(command, cwd=self.root)
+
+    def run_postgres_apply_sql_with_retry(self, service: Dict[str, Any], script_path: str) -> None:
+        deadline = time.time() + self.service_start_timeout(service)
+        while True:
+            try:
+                self.run_postgres_apply_sql(service, script_path)
+                return
+            except DevstackError as error:
+                if time.time() >= deadline:
+                    raise error
+                time.sleep(2)
+
+    def run_postgres_apply_sql(self, service: Dict[str, Any], script_path: str) -> None:
+        compose_file = self.compose_file_path(service)
+        defaults = MANAGED_DATABASES["postgresql"]
+        username = str(service.get("username") or defaults["username"])
+        password = str(service.get("password") or defaults["password"])
+        database = str(service.get("database") or "").strip()
+        if not database:
+            raise DevstackError(
+                f"{service.get('service', 'postgres')}: cannot apply SQL — no database configured"
+            )
+        # `sh -c "PGPASSWORD=... psql -U <user> -d <db> -f <path>"` is the
+        # canonical psql invocation. PGPASSWORD avoids interactive prompts
+        # without exposing the password on the argv list outside the container.
+        inner = (
+            f"PGPASSWORD={shlex.quote(password)} "
+            f"psql -v ON_ERROR_STOP=1 -U {shlex.quote(username)} "
+            f"-d {shlex.quote(database)} -f {shlex.quote(script_path)}"
+        )
+        command = [
+            *compose_command(self.root),
+            *compose_project_args(service),
+            "-f",
+            str(compose_file),
+            "exec",
+            "-T",
+            str(service["service"]),
+            "sh",
+            "-c",
+            inner,
+        ]
+        run(command, cwd=self.root)
 
     def run_mssql_sqlcmd_with_retry(self, service: Dict[str, Any], args: List[str]) -> None:
         deadline = time.time() + self.service_start_timeout(service)

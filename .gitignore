@@ -6,3 +6,7 @@ __pycache__/
 # crew (agent-crew local workspace)
 .agent-crew/
 .crew-worktrees/
+
+# AI assistant workspaces
+.codex/
+.claude/

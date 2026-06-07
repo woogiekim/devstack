@@ -15395,13 +15395,14 @@ class Workspace:
     ) -> Optional[Path]:
         """Resolve the host-side path of the seeded init_schema / init_dml file.
 
-        Returns None when the field is not set on the service or when the
-        materialized file is missing on disk — the caller treats both as
-        "no SQL to apply" and silently skips it.
+        Returns None when the materialized file is missing on disk — the caller
+        treats that as "no SQL to apply" and silently skips it.
+
+        Note: the service registry entry may have init_schema/init_dml set to
+        null for workspaces created before the Issue #2 fix (MSSQL-only guard
+        removed). We therefore skip the registry check and rely solely on disk
+        presence so that legacy registries still get DDL applied.
         """
-        script = str(service.get(key) or "").strip()
-        if not script:
-            return None
         if key == "init_schema":
             path = managed_schema_path(self.name, engine)
         else:
@@ -15420,9 +15421,10 @@ class Workspace:
 
         The warning also points the user at the existing ``--recreate-volumes``
         remediation path so they can rebuild from scratch when needed."""
-        # Skip the warning entirely when neither init_schema nor init_dml is
-        # configured — there is no DDL to apply, so no bypass is happening.
-        if not service.get("init_schema") and not service.get("init_dml"):
+        # Skip the warning when no managed SQL files exist on disk — nothing to apply.
+        schema_exists = managed_schema_path(self.name, engine).exists()
+        dml_exists = managed_dml_path(self.name, engine).exists()
+        if not schema_exists and not dml_exists:
             return
         if not managed_data_volume_exists(engine, label):
             return
@@ -15459,14 +15461,10 @@ class Workspace:
             raise DevstackError(
                 f"{service.get('service', 'mysql')}: cannot apply SQL — no database configured"
             )
-        # `sh -c "mysql ... < /script"` is the most portable form across mysql
-        # and mariadb images: it avoids assumptions about argparse handling
-        # of `-e` quoting and reuses stdin redirection which every official
-        # image supports.
-        inner = (
-            f"mysql -u{shlex.quote(username)} -p{shlex.quote(password)} "
-            f"{shlex.quote(database)} < {shlex.quote(script_path)}"
-        )
+        # Pipe the SQL file from the host into the container via stdin.
+        # `docker compose exec -T` disables the TTY and allows stdin redirection,
+        # so the host process opens the file and the container's mysql reads it
+        # through its stdin — no container-side file path is referenced.
         command = [
             *compose_command(self.root),
             *compose_project_args(service),
@@ -15475,11 +15473,25 @@ class Workspace:
             "exec",
             "-T",
             str(service["service"]),
-            "sh",
-            "-c",
-            inner,
+            "mysql",
+            f"-u{username}",
+            f"-p{password}",
+            database,
         ]
-        run(command, cwd=self.root)
+        try:
+            with open(script_path, "rb") as sql_file:
+                result = subprocess.run(
+                    command,
+                    stdin=sql_file,
+                    cwd=self.root,
+                    check=True,
+                )
+        except FileNotFoundError as exc:
+            raise DevstackError(f"command not found: {command[0]}") from exc
+        except subprocess.CalledProcessError as exc:
+            raise DevstackError(
+                f"command failed ({exc.returncode}): {' '.join(command)}"
+            ) from exc
 
     def run_postgres_apply_sql_with_retry(self, service: Dict[str, Any], script_path: str) -> None:
         deadline = time.time() + self.service_start_timeout(service)
@@ -15502,14 +15514,9 @@ class Workspace:
             raise DevstackError(
                 f"{service.get('service', 'postgres')}: cannot apply SQL — no database configured"
             )
-        # `sh -c "PGPASSWORD=... psql -U <user> -d <db> -f <path>"` is the
-        # canonical psql invocation. PGPASSWORD avoids interactive prompts
-        # without exposing the password on the argv list outside the container.
-        inner = (
-            f"PGPASSWORD={shlex.quote(password)} "
-            f"psql -v ON_ERROR_STOP=1 -U {shlex.quote(username)} "
-            f"-d {shlex.quote(database)} -f {shlex.quote(script_path)}"
-        )
+        # Pipe the SQL file from the host into the container via stdin.
+        # PGPASSWORD is passed through docker compose exec -e so it never
+        # appears on the container's process argv.
         command = [
             *compose_command(self.root),
             *compose_project_args(service),
@@ -15517,12 +15524,31 @@ class Workspace:
             str(compose_file),
             "exec",
             "-T",
+            "-e",
+            f"PGPASSWORD={password}",
             str(service["service"]),
-            "sh",
-            "-c",
-            inner,
+            "psql",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-U",
+            username,
+            "-d",
+            database,
         ]
-        run(command, cwd=self.root)
+        try:
+            with open(script_path, "rb") as sql_file:
+                result = subprocess.run(
+                    command,
+                    stdin=sql_file,
+                    cwd=self.root,
+                    check=True,
+                )
+        except FileNotFoundError as exc:
+            raise DevstackError(f"command not found: {command[0]}") from exc
+        except subprocess.CalledProcessError as exc:
+            raise DevstackError(
+                f"command failed ({exc.returncode}): {' '.join(command)}"
+            ) from exc
 
     def run_mssql_sqlcmd_with_retry(self, service: Dict[str, Any], args: List[str]) -> None:
         deadline = time.time() + self.service_start_timeout(service)

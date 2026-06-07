@@ -12918,8 +12918,10 @@ class InitializeManagedInfraMySQLPostgresTest(unittest.TestCase):
             workspace, _, _ = self._workspace_with_schema_files(
                 Path(tmp), "mysql", with_dml=False
             )
-            # Remove the schema file we seeded — simulating "no DDL configured"
+            # Remove both SQL files — simulating "no DDL configured".
+            # DML may exist on disk from a prior test run, so remove it too.
             ccstack.managed_schema_path("test-shop", "mysql").unlink()
+            ccstack.managed_dml_path("test-shop", "mysql").unlink(missing_ok=True)
             service = {
                 "type": "compose",
                 "engine": "mysql",
@@ -13089,16 +13091,14 @@ class InitializeManagedInfraMySQLPostgresTest(unittest.TestCase):
                 "password": "ccstack",
             }
             with mock.patch.object(ccstack, "compose_command", return_value=["docker", "compose"]), \
-                 mock.patch.object(ccstack, "run") as run_mock:
+                 mock.patch.object(ccstack.subprocess, "run") as subprocess_mock:
+                subprocess_mock.return_value = mock.MagicMock(returncode=0)
                 workspace.run_mysql_apply_sql(service, str(schema_path))
-        args = run_mock.call_args.args[0]
+        args = subprocess_mock.call_args.args[0]
         # Must invoke compose exec on the right service with stdin = SQL file
         self.assertIn("exec", args)
         self.assertIn("-T", args)
         self.assertIn("mysql", args)
-        # Either a `mysql` CLI call (with -u/-p and the database) or a `sh -c`
-        # wrapper must be present — both forms are acceptable, but the database
-        # name must appear in the command.
         self.assertTrue(
             "shop" in " ".join(args),
             f"database name 'shop' must appear in args: {args}",
@@ -13117,9 +13117,10 @@ class InitializeManagedInfraMySQLPostgresTest(unittest.TestCase):
                 "password": "ccstack",
             }
             with mock.patch.object(ccstack, "compose_command", return_value=["docker", "compose"]), \
-                 mock.patch.object(ccstack, "run") as run_mock:
+                 mock.patch.object(ccstack.subprocess, "run") as subprocess_mock:
+                subprocess_mock.return_value = mock.MagicMock(returncode=0)
                 workspace.run_postgres_apply_sql(service, str(schema_path))
-        args = run_mock.call_args.args[0]
+        args = subprocess_mock.call_args.args[0]
         self.assertIn("exec", args)
         self.assertIn("-T", args)
         self.assertIn("postgres", args)

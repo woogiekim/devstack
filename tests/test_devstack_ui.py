@@ -12638,5 +12638,56 @@ class CcstackUiBugFixTest(unittest.TestCase):
         self.assertIn("doctorCancelButton.disabled = !isActive", apply_slice)
 
 
+class ParseJdbcUrlSpringPlaceholderTest(unittest.TestCase):
+    """Regression tests for parse_jdbc_url with Spring ${…} placeholder syntax.
+
+    Issue #1: when a JDBC URL is wrapped in ${name:defaultValue} form and the
+    default value starts with jdbc:, the function must extract and parse that
+    default value instead of returning {}.
+    """
+
+    def test_plain_jdbc_url_is_unaffected(self):
+        result = ccstack.parse_jdbc_url("jdbc:postgresql://localhost:5432/mydb")
+        self.assertEqual(result["engine"], "postgresql")
+        self.assertEqual(result["host"], "localhost")
+        self.assertEqual(result["port"], 5432)
+        self.assertEqual(result["database"], "mydb")
+
+    def test_spring_placeholder_with_jdbc_default_is_parsed(self):
+        url = "${SPRING_DATASOURCE_URL:jdbc:mysql://localhost:3306/shopdb}"
+        result = ccstack.parse_jdbc_url(url)
+        self.assertNotEqual(result, {}, "parse_jdbc_url returned {} for a Spring placeholder URL with jdbc: default")
+        self.assertEqual(result["engine"], "mysql")
+        self.assertEqual(result["host"], "localhost")
+        self.assertEqual(result["port"], 3306)
+        self.assertEqual(result["database"], "shopdb")
+
+    def test_spring_placeholder_with_postgresql_default(self):
+        url = "${DS_URL:jdbc:postgresql://db-host:5432/analytics}"
+        result = ccstack.parse_jdbc_url(url)
+        self.assertEqual(result["engine"], "postgresql")
+        self.assertEqual(result["host"], "db-host")
+        self.assertEqual(result["port"], 5432)
+        self.assertEqual(result["database"], "analytics")
+
+    def test_spring_placeholder_without_jdbc_default_returns_empty(self):
+        # A placeholder whose default value is not a JDBC URL should return {}
+        url = "${SPRING_DATASOURCE_URL:some-other-value}"
+        result = ccstack.parse_jdbc_url(url)
+        self.assertEqual(result, {})
+
+    def test_spring_placeholder_without_default_returns_empty(self):
+        url = "${SPRING_DATASOURCE_URL}"
+        result = ccstack.parse_jdbc_url(url)
+        self.assertEqual(result, {})
+
+    def test_spring_placeholder_with_sqlserver_default(self):
+        url = "${APP_JDBC_URL:jdbc:sqlserver://sqlserver-host:1433;databaseName=AppDB}"
+        result = ccstack.parse_jdbc_url(url)
+        self.assertEqual(result["engine"], "sqlserver")
+        self.assertEqual(result["host"], "sqlserver-host")
+        self.assertEqual(result["database"], "AppDB")
+
+
 if __name__ == "__main__":
     unittest.main()

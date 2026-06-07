@@ -6254,7 +6254,11 @@ def allocate_port(preferred: int, used_ports: Set[int]) -> int:
 
 
 def parse_jdbc_url(url: str) -> Dict[str, Any]:
-    match = re.match(r"jdbc:([^:]+):(.*)", str(url).strip())
+    url = str(url).strip()
+    _placeholder = re.match(r'^\$\{[^}]*:(jdbc:[^}]+)\}$', url)
+    if _placeholder:
+        url = _placeholder.group(1)
+    match = re.match(r"jdbc:([^:]+):(.*)", url)
     if not match:
         return {}
     engine, remainder = match.groups()

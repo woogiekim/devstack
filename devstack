@@ -3822,8 +3822,13 @@ def attach_schema_files_to_generated_databases(
                 if engine == "mssql"
                 else "/docker-entrypoint-initdb.d/010-devstack-local-schema.sql"
             )
-            if engine == "mssql":
-                requirement["init_schema"] = target
+            # Set init_schema for all database types so existing_managed_infra_requirement
+            # can reconstruct the bind-mount on re-apply (GitHub issue #2).
+            # MySQL/PostgreSQL: named volumes and initdb.d are mutually exclusive at first
+            # start — if a named data volume already exists the init script is silently
+            # skipped by the container runtime; this field still must be populated so the
+            # bind-mount entry survives across repeated `devstack apply` calls.
+            requirement["init_schema"] = target
             bind = f"{script_path}:{target}:ro"
             if bind not in volumes:
                 volumes.append(bind)
@@ -3834,8 +3839,8 @@ def attach_schema_files_to_generated_databases(
                 if engine == "mssql"
                 else "/docker-entrypoint-initdb.d/020-devstack-local-dml.sql"
             )
-            if engine == "mssql":
-                requirement["init_dml"] = target
+            # Set init_dml for all database types (same reasoning as init_schema above).
+            requirement["init_dml"] = target
             bind = f"{dml_path}:{target}:ro"
             if bind not in volumes:
                 volumes.append(bind)

@@ -2933,10 +2933,44 @@ def existing_managed_infra_requirement(name: str, service_name: str, service: Di
         init_dml = str(service.get("init_dml") or "")
         schema_path = managed_schema_path(name, database_engine)
         dml_path = managed_dml_path(name, database_engine)
-        if init_schema and schema_path.exists():
-            volumes.append(f"{schema_path}:{init_schema}:ro")
-        if init_dml and dml_path.exists():
-            volumes.append(f"{dml_path}:{init_dml}:ro")
+
+        # Engine-correct container targets for the init scripts. MSSQL keeps the
+        # /devstack-init/ path (sqlcmd reads the file from inside the container),
+        # while MySQL/PostgreSQL use /docker-entrypoint-initdb.d/ which the
+        # official images execute automatically on a fresh data volume. The
+        # mapping mirrors attach_schema_files_to_generated_databases so a fresh
+        # apply and a regeneration produce the same compose payload.
+        default_schema_target = (
+            "/devstack-init/010-devstack-local-schema.sql"
+            if database_engine == "mssql"
+            else "/docker-entrypoint-initdb.d/010-devstack-local-schema.sql"
+        )
+        default_dml_target = (
+            "/devstack-init/020-devstack-local-dml.sql"
+            if database_engine == "mssql"
+            else "/docker-entrypoint-initdb.d/020-devstack-local-dml.sql"
+        )
+
+        # Append the bind-mount whenever the host-side SQL file exists on disk,
+        # regardless of init_schema / init_dml being populated on the persisted
+        # service entry. This fixes the latent regression where legacy entries
+        # (or any entry where these fields were cleared) caused the bind-mounts
+        # to silently drop out of the regenerated compose file — leaving the
+        # next `docker compose up` on a fresh named data volume with an empty
+        # database. Persist init_schema / init_dml back to the canonical engine
+        # targets so subsequent regenerations remain stable.
+        if schema_path.exists():
+            target_schema = init_schema or default_schema_target
+            bind = f"{schema_path}:{target_schema}:ro"
+            if bind not in volumes:
+                volumes.append(bind)
+            init_schema = target_schema
+        if dml_path.exists():
+            target_dml = init_dml or default_dml_target
+            bind = f"{dml_path}:{target_dml}:ro"
+            if bind not in volumes:
+                volumes.append(bind)
+            init_dml = target_dml
         return {
             **base,
             "technology": database_engine,

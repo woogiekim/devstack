@@ -12638,5 +12638,142 @@ class CcstackUiBugFixTest(unittest.TestCase):
         self.assertIn("doctorCancelButton.disabled = !isActive", apply_slice)
 
 
+class AttachSchemaFilesNonMssqlTest(unittest.TestCase):
+    """Regression tests for GitHub issue #2: attach_schema_files_to_generated_databases
+    must set init_schema / init_dml for all database types, not just mssql.
+
+    The bug caused /docker-entrypoint-initdb.d bind mounts to be dropped on every
+    re-apply for MySQL and PostgreSQL because existing_managed_infra_requirement
+    only re-adds the bind mount when init_schema or init_dml is truthy.
+    """
+
+    def _make_requirement(self, engine: str) -> dict:
+        return {
+            "technology": engine,
+            "volumes": [],
+        }
+
+    def test_attach_schema_sets_init_schema_for_mysql(self):
+        """MySQL requirements must have init_schema set after attach so
+        existing_managed_infra_requirement can re-add the bind mount on re-apply."""
+        requirement = self._make_requirement("mysql")
+        schema_file = Path("/workspace/.devstack/infra/mysql-schema.sql")
+        ccstack.attach_schema_files_to_generated_databases(
+            [requirement],
+            {"mysql": schema_file},
+        )
+        self.assertEqual(
+            requirement.get("init_schema"),
+            "/docker-entrypoint-initdb.d/010-devstack-local-schema.sql",
+            "MySQL requirement must have init_schema set for re-apply bind-mount survival",
+        )
+
+    def test_attach_schema_sets_init_dml_for_mysql(self):
+        """MySQL requirements must have init_dml set after attach."""
+        requirement = self._make_requirement("mysql")
+        schema_file = Path("/workspace/.devstack/infra/mysql-schema.sql")
+        dml_file = Path("/workspace/.devstack/infra/mysql-dml.sql")
+        ccstack.attach_schema_files_to_generated_databases(
+            [requirement],
+            {"mysql": schema_file},
+            {"mysql": dml_file},
+        )
+        self.assertEqual(
+            requirement.get("init_dml"),
+            "/docker-entrypoint-initdb.d/020-devstack-local-dml.sql",
+            "MySQL requirement must have init_dml set for re-apply bind-mount survival",
+        )
+
+    def test_attach_schema_sets_init_schema_for_postgresql(self):
+        """PostgreSQL requirements must have init_schema set after attach."""
+        requirement = self._make_requirement("postgresql")
+        schema_file = Path("/workspace/.devstack/infra/pg-schema.sql")
+        ccstack.attach_schema_files_to_generated_databases(
+            [requirement],
+            {"postgresql": schema_file},
+        )
+        self.assertEqual(
+            requirement.get("init_schema"),
+            "/docker-entrypoint-initdb.d/010-devstack-local-schema.sql",
+            "PostgreSQL requirement must have init_schema set for re-apply bind-mount survival",
+        )
+
+    def test_attach_schema_sets_init_dml_for_postgresql(self):
+        """PostgreSQL requirements must have init_dml set after attach."""
+        requirement = self._make_requirement("postgresql")
+        schema_file = Path("/workspace/.devstack/infra/pg-schema.sql")
+        dml_file = Path("/workspace/.devstack/infra/pg-dml.sql")
+        ccstack.attach_schema_files_to_generated_databases(
+            [requirement],
+            {"postgresql": schema_file},
+            {"postgresql": dml_file},
+        )
+        self.assertEqual(
+            requirement.get("init_dml"),
+            "/docker-entrypoint-initdb.d/020-devstack-local-dml.sql",
+            "PostgreSQL requirement must have init_dml set for re-apply bind-mount survival",
+        )
+
+    def test_mssql_init_schema_path_unchanged(self):
+        """MSSQL must still use /devstack-init/ path (not /docker-entrypoint-initdb.d/)."""
+        requirement = self._make_requirement("mssql")
+        schema_file = Path("/workspace/.devstack/infra/mssql-schema.sql")
+        ccstack.attach_schema_files_to_generated_databases(
+            [requirement],
+            {"mssql": schema_file},
+        )
+        self.assertEqual(
+            requirement.get("init_schema"),
+            "/devstack-init/010-devstack-local-schema.sql",
+        )
+
+    def test_mssql_init_dml_path_unchanged(self):
+        """MSSQL must still use /devstack-init/ path for DML (not /docker-entrypoint-initdb.d/)."""
+        requirement = self._make_requirement("mssql")
+        schema_file = Path("/workspace/.devstack/infra/mssql-schema.sql")
+        dml_file = Path("/workspace/.devstack/infra/mssql-dml.sql")
+        ccstack.attach_schema_files_to_generated_databases(
+            [requirement],
+            {"mssql": schema_file},
+            {"mssql": dml_file},
+        )
+        self.assertEqual(
+            requirement.get("init_dml"),
+            "/devstack-init/020-devstack-local-dml.sql",
+        )
+
+    def test_bind_mount_added_to_volumes_for_mysql(self):
+        """Bind-mount must be added to the volumes list for MySQL."""
+        requirement = self._make_requirement("mysql")
+        schema_file = Path("/workspace/.devstack/infra/mysql-schema.sql")
+        ccstack.attach_schema_files_to_generated_databases(
+            [requirement],
+            {"mysql": schema_file},
+        )
+        self.assertIn(
+            f"{schema_file}:/docker-entrypoint-initdb.d/010-devstack-local-schema.sql:ro",
+            requirement["volumes"],
+        )
+
+    def test_bind_mount_not_duplicated_on_reattach(self):
+        """Calling attach twice must not duplicate the bind-mount entry."""
+        requirement = self._make_requirement("mysql")
+        schema_file = Path("/workspace/.devstack/infra/mysql-schema.sql")
+        ccstack.attach_schema_files_to_generated_databases(
+            [requirement],
+            {"mysql": schema_file},
+        )
+        ccstack.attach_schema_files_to_generated_databases(
+            [requirement],
+            {"mysql": schema_file},
+        )
+        self.assertEqual(
+            requirement["volumes"].count(
+                f"{schema_file}:/docker-entrypoint-initdb.d/010-devstack-local-schema.sql:ro"
+            ),
+            1,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
